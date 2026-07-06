@@ -1,0 +1,4 @@
+- [Subject 131 clock offset](subject-131-clock-offset.md) — LivingLab EEG device clock is ~1h off from CSV task logs for subject 131 (BST); matters only for labeling, not preprocessing
+- [Pipeline scope decisions](pipeline-scope-decisions.md) — settled build choices: 10 s window, session_start ref, Stages 10–11 deferred to 30-patient phase
+- [LivingLab data issues](livinglab-data-issues.md) — corrupt/zero-duration/out-of-range task rows in pilot CSVs that windowing must skip
+- [LivingLab amplitude rejection](livinglab-amplitude-rejection.md) — 100µV threshold drops 97-100% of windows; rejection disabled for pilot; sub-134 bad channels (O1/Fz)

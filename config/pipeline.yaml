@@ -1,0 +1,100 @@
+# CodeBrain LivingLab preprocessing pipeline configuration.
+# Single source of truth. No parameter may appear as a literal anywhere in code.
+# Every value below is a settled decision (see README.md §6); the loader
+# (src/livinglab_prep/config.py) validates types/ranges and rejects unknown keys.
+
+paths:
+  raw_dir: LivingLabData        # read-only 30-ch @300 Hz EDFs (never written)
+  csv_dir: LivingLabData        # task-timestamp CSVs (same dir here)
+  processed_dir: processed      # ALL outputs go here
+  scratch_dir: scratch          # cloned reference repos / temp
+
+channels:
+  # 18 usable scalp electrodes, canonical order. Pz excluded (degenerate ref).
+  keep: [Fp1, Fp2, F7, F3, Fz, F4, F8, T3, C3, Cz, C4, T4, T5, P3, P4, T6, O1, O2]
+  rename_from_pattern: "EEG {name}-Pz"   # raw label -> standard name
+  reference_note: "Re-referenced to linked ears (mean of A1, A2) as the first step; removes the recorded single-Pz reference."
+
+reref:
+  # Re-referencing is the FIRST transformation, applied to the raw preloaded Raw
+  # BEFORE channel selection or filtering (A1/A2 must still be present; supervisor
+  # requires it on the raw data). new_ch = ch - mean(ref_channels); with Pz-
+  # referenced input this cancels the Pz term algebraically -> linked-ears montage.
+  #   scheme        : output subdir = processed/reref-<scheme>/ (isolates schemes)
+  #   ref_channels  : STANDARD electrode names; [] means keep the recorded Pz ref
+  scheme: linkedears
+  ref_channels: [A1, A2]        # linked ears (mean of the two mastoid/ear refs)
+
+signal:
+  orig_sfreq: 300
+  target_sfreq: 200
+  bandpass: {l_freq: 0.3, h_freq: 75, fir_design: firwin, phase: zero}
+  notch_freq: 50                # UK mains
+  extract_units: uV
+
+ica:
+  # ICA artifact removal (mne + mne-icalabel). Position (STRICT):
+  #   reref -> bandpass -> notch -> [ICA] -> channel-select(18) -> resample -> window.
+  # Fitted PER RECORDING on the EEG scalp channels only (the 18 in channels.keep;
+  # A1/A2 are degenerate after linked-ears reref and Pz is the old reference, all
+  # excluded). Fit on a high-passed copy, apply to the 0.3-75 Hz data. Extended
+  # infomax is required by ICLabel. Every knob below fixes the decomposition so
+  # output is byte-reproducible for a given seed.
+  enabled: true
+  n_components: 18             # = EEG scalp channels = full data rank; so removing 0
+                              # components is the identity and before/after ICA isolates
+                              # artifact removal (no PCA rank-reduction confound)
+  method: infomax              # ICLabel requires (extended) infomax
+  extended: true
+  max_iter: 500                # infomax iteration cap (deterministic)
+  fit_highpass_hz: 1.0         # high-pass (Hz) for the fit copy only
+  fit_sfreq: 100               # resample fit/label copy to 100 Hz (ICLabel's native rate); apply unmixing to full-rate data
+  decim: 1                     # extra fit decimation on top of fit_sfreq (1 = none)
+  random_state: 1              # fixed seed -> reproducible components
+  iclabel_min_prob: 0.5        # remove an artifact component only if winning prob >= this
+  # ICLabel classes to remove (winning label). "brain" and "other" are ALWAYS kept.
+  exclude_labels: [muscle artifact, eye blink, heart beat, line noise, channel noise]
+  save_plots: true             # save component topomaps + properties for human review
+  plot_crop_s: 180             # per-component property plots use this many seconds (review artifact)
+
+sweep:
+  # Amplitude-threshold sweep grid (uV) for the before/after-ICA window-survival
+  # tables. A window is REJECTED if any channel's peak abs value at any sample
+  # reaches the threshold (matches reject.mode). No winner is chosen here.
+  thresholds_uV: [100, 150, 200, 300, 400, 500, 750, 1000]
+
+window:
+  length_s: 10                  # confirmed safe (shortest real task ~12 s)
+  train_stride_s: 5             # 50% overlap (finest grid; role selection deferred)
+  eval_stride_s: 10             # non-overlapping subset tag
+  samples_per_patch: 200        # = target_sfreq * 1 s. DO NOT CHANGE.
+
+reject:
+  # DISABLED for the pilot (user decision 2026-07-02): the CBraMod pretraining
+  # threshold of 100 uV discards 97-100% of windows on this task-based, mobile,
+  # Pz-referenced data (verified genuine, not a scale bug). All windows retained
+  # for the correctness harness; artifact handling deferred to the cohort phase.
+  enabled: false
+  mode: peak_abs_whole_window   # np.max(np.abs(window))
+  threshold_uV: 100             # CodeBrain/CBraMod pretraining default
+  warn_drop_frac: 0.30          # loud warning if a patient loses > this fraction
+
+labels:
+  condition_map: {A: 0, C: 1}   # A=ON/peak -> 0, C=OFF/wearing-off -> 1
+  continuous_target: elapsed_time_s
+  continuous_reference: session_start   # CONFIRMED (not task_start)
+  continuous_normalize: none
+
+align:
+  # Method preference order handled in code: meas_date -> annotations -> trigger.
+  # Verify offset-vs-drift on first AND last shared event.
+  max_reconcile_error_s: 2.0    # first/last event agreement tolerance for "constant offset"
+  min_tasks_fit_frac: 0.5       # >= this fraction of tasks must land inside recording
+
+split:
+  strategy: LOPO                # DEFERRED to 30-patient phase; not run in this build
+  shuffle_train_windows: true
+  seed: 1
+
+run:
+  seed: 1
