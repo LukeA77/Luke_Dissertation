@@ -6,3 +6,9 @@ __pycache__/
 *.pyc
 .pytest_cache/
 scratch/
+
+# Generated evidence artifacts (regeneratable; kept out of git to avoid bloat).
+# The scripts that produce them ARE tracked; the outputs are not.
+*.png
+*.zip
+spectral_before_after_data.csv

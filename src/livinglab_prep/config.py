@@ -157,6 +157,10 @@ class Ica(_Strict):
     random_state: int
     iclabel_min_prob: float = Field(ge=0, le=1)
     exclude_labels: list[str]               # ICLabel classes to remove (never brain/other)
+    eog_channels: list[str]                 # frontal channels used as the blink-correlation proxy
+    eog_corr_threshold: float = Field(ge=0, le=1)  # |r| cutoff for find_bads_eog(measure='correlation')
+    eog_l_freq: float = Field(gt=0)         # blink-band low edge for find_bads_eog's internal filter
+    eog_h_freq: float = Field(gt=0)         # blink-band high edge for find_bads_eog's internal filter
     save_plots: bool
     plot_crop_s: float = Field(gt=0)        # segment length for per-component property plots
 
@@ -172,6 +176,14 @@ class Ica(_Strict):
             if keep in self.exclude_labels:
                 raise ValueError(f"ica.exclude_labels must never contain '{keep}' "
                                  "(brain and other are always kept)")
+        if "eye blink" in self.exclude_labels:
+            raise ValueError(
+                "ica.exclude_labels must not contain 'eye blink': ICLabel's winning "
+                "label misses blink components off-distribution (see PROGRESS.md "
+                "Problem 2); blinks are identified separately via eog_channels/"
+                "eog_corr_threshold (frontal-correlation, find_bads_eog).")
+        if not self.eog_channels:
+            raise ValueError("ica.eog_channels must list at least one frontal channel")
         return self
 
 

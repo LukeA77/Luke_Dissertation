@@ -53,7 +53,16 @@ ica:
   random_state: 1              # fixed seed -> reproducible components
   iclabel_min_prob: 0.5        # remove an artifact component only if winning prob >= this
   # ICLabel classes to remove (winning label). "brain" and "other" are ALWAYS kept.
-  exclude_labels: [muscle artifact, eye blink, heart beat, line noise, channel noise]
+  # NOTE: "eye blink" is deliberately absent here -- ICLabel runs off-distribution
+  # on this linked-ears/mobile/Parkinsonian data and often mislabels blink
+  # components "brain"/"other" (see PROGRESS.md Problem 2), so blinks are instead
+  # identified below by frontal-channel correlation (eog_* below), independent of
+  # ICLabel's label.
+  exclude_labels: [muscle artifact, heart beat, line noise, channel noise]
+  eog_channels: [Fp1, Fp2]     # frontal channels used as the blink-correlation proxy
+  eog_corr_threshold: 0.5      # |r| cutoff (find_bads_eog, measure='correlation') to flag a component as ocular
+  eog_l_freq: 1.0              # blink-band low edge (Hz) for find_bads_eog's internal filter
+  eog_h_freq: 10.0             # blink-band high edge (Hz) for find_bads_eog's internal filter
   save_plots: true             # save component topomaps + properties for human review
   plot_crop_s: 180             # per-component property plots use this many seconds (review artifact)
 

@@ -359,9 +359,11 @@ def _print_summary(keys, thresholds, peaks, channels, medians, reports, out_dir)
     print("\n=== 3. ICA COMPONENTS REMOVED PER RECORDING ===")
     for r in reports:
         if r.excluded_idx:
-            detail = ", ".join(f"IC{i}={lbl}({p:.2f})"
-                               for i, lbl, p in zip(r.excluded_idx, r.excluded_labels,
-                                                    r.excluded_probs))
+            eog_set = set(r.eog_excluded_idx)
+            detail = ", ".join(
+                f"IC{i}={lbl}({p:.2f})"
+                + (" [eog-frontal-corr]" if i in eog_set else " [iclabel]")
+                for i, lbl, p in zip(r.excluded_idx, r.excluded_labels, r.excluded_probs))
         else:
             detail = "none"
         print(f"  {r.key}: removed {len(r.excluded_idx)}/{r.n_components} -> {detail}")

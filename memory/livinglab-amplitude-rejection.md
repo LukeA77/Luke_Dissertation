@@ -1,6 +1,6 @@
 ---
 name: livinglab-amplitude-rejection
-description: CBraMod 100uV reject threshold destroys LivingLab data; rejection disabled for pilot; sub-134 has bad channels
+description: CBraMod 100uV reject threshold destroys LivingLab data; rejection disabled for pilot; sub-134 has bad channels; rejection tuning parked pending supervisor spectral review, ICA now fixed for blinks
 metadata:
   type: project
 ---
@@ -17,4 +17,28 @@ Key pilot finding (2026-07-02): CBraMod's **100 µV whole-window peak-abs reject
 
 **ICA + threshold-sweep result (2026-07-03):** ICLabel-guided ICA (mne + mne-icalabel, extended infomax, per recording, fit on the 18 scalp channels only, `n_components=18`=full rank so removing 0 = identity) was bracketed by a threshold sweep before/after — run via `eeg_reref_ica.py` (`clean_with_ica` in `src/livinglab_prep/ica.py`); outputs isolated in `processed/reref-linkedears_ica/`. Config: fit on 1 Hz-highpassed copy resampled to 100 Hz (ICLabel's native rate; apply unmixing back to 300 Hz data), `iclabel_min_prob=0.5`, exclude {muscle, eye blink, heart, line noise, channel noise}. **Off-distribution ICLabel (linked-ears ≠ its common-avg training) barely flags artifacts:** removed **1 eye-blink each from sub-131-a/c, 0 from sub-134** (sub-134's chronic bad channels were NOT labelled artifacts). **Survival gain from ICA is small and mid-range only:** overall window survival before→after ICA — 100 µV 1.6→1.8%, 150 µV 4.1→5.8%, 200 µV 8.2→10.5% (peak effect +2.3 pp), ≥500 µV ≈0. Per-channel median peak: sub-131 dropped a further ~15–21% (321→158→134; 226→136→108), sub-134 unchanged (0 comps removed = identity, confirming no rank confound). Determinism verified (identical hash on re-run, seed=1). **Conclusion: ICA alone does not rescue the ~98% rejection at 100 µV; its benefit is a few pp of survival in the 150–300 µV band from ocular-transient removal. No final threshold chosen — that's a supervisor decision from the sweep.** Key gotchas: this machine has ~1.5–2 GB free RAM, so ICA/ICLabel on ~50-min recordings needs the 100 Hz fit copy + freeing intermediates or it segfaults/OOMs; MNE mis-types the EDF's accelerometers/CM/aux as `eeg`, so the EEG set is taken explicitly from `channels.keep` (never `pick('eeg')`).
 
-**How to apply:** for the cohort phase, revisit rejection (recalibrated single global constant, or a per-channel/robust operator) and channel-quality screening; reref (on by default) and ICA are both orthogonal to the survival problem and neither solves it. If ICA is kept, consider lowering `iclabel_min_prob` and reviewing the saved topomaps/properties, given ICLabel runs off-distribution here.
+**Frontal-correlation blink fix (2026-07-08):** diagnosed that ICLabel's *winning-label*
+rule was the actual bug for eye blinks, not ICA's separation -- ICLabel runs
+off-distribution here (linked-ears/mobile/PD vs its common-average/seated/non-PD
+training) and often labels real blink components "brain"/"other" (sub-134 eye-blink
+prob only 0.10-0.25), so the winning-label rule removed 0 components even though
+topomaps clearly showed frontal blink components. Fixed in `src/livinglab_prep/ica.py`:
+blink components are now identified by frontal-channel correlation
+(`ICA.find_bads_eog(measure='correlation', ch_name='Fp1'/'Fp2', threshold=0.5)`),
+unioned with the (unchanged) ICLabel winning-label rule for the other artifact classes
+(muscle/heart/line-noise/channel-noise). `ica.exclude_labels` in config no longer
+contains `eye blink`. Smoke-tested against the real EDFs: sub-134-a/-c now correctly
+remove their IC16/IC17 blink components (eog r~0.9), matching the diagnosed values.
+
+**Decision (2026-07-08, user call): amplitude-rejection threshold work is PARKED, not
+being pursued further right now.** Not chasing a recalibrated number off 2 patients.
+Instead: ship the ICA fix above (rejection stays disabled), then produce a before/after
+spectral (PSD) comparison for sub-131/sub-134 and send it to the supervisor -- he
+decides if signal quality is good enough to proceed. Revisit rejection only if/when he
+asks for it to be turned back on.
+
+**How to apply:** rejection stays `enabled: false`. Do not spend more effort guessing a
+threshold or running the cohort sweep until the supervisor's spectral-quality call comes
+back. ICA now does real, correct artifact removal (blinks + the other ICLabel classes);
+if the supervisor asks about residual noise, the answer is "amplitude rejection is
+deliberately deferred," not "ICA doesn't work."

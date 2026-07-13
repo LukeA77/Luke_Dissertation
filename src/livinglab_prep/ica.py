@@ -18,9 +18,21 @@ scalp channels only. Design choices (all config-driven, see config.Ica):
   * ICA is sensitive to slow drift, so it is fit on a high-passed COPY (fit_highpass_hz)
     and the resulting unmixing is applied to the 0.3-75 Hz data.
   * Extended infomax (method='infomax', extended=True) -- required by ICLabel.
-  * Components are labelled by mne-icalabel (ICLabel) and removed iff the winning
-    label is in ica.exclude_labels with winning probability >= ica.iclabel_min_prob.
-    'brain' and 'other' are always kept.
+  * Two independent, unioned exclusion rules:
+    - Non-ocular artifacts (muscle, heart beat, line noise, channel noise) are
+      removed iff ICLabel's WINNING label is in ica.exclude_labels with winning
+      probability >= ica.iclabel_min_prob.
+    - Eye-blink components are NOT identified via ICLabel's label. ICLabel runs
+      off-distribution on this linked-ears/mobile/Parkinsonian data and often
+      mislabels real blink components 'brain'/'other' (see PROGRESS.md Problem 2:
+      sub-134's blink components got eye-blink probability 0.10-0.25). Instead,
+      blink components are identified by frontal-channel correlation --
+      ``ICA.find_bads_eog`` with ``measure='correlation'`` against ica.eog_channels
+      (Fp1/Fp2), flagging any component whose |r| >= ica.eog_corr_threshold. This
+      is the standard EOG-proxy method and is independent of ICLabel's training
+      distribution.
+    'brain' and 'other' are always kept; ica.exclude_labels must not contain
+    'eye blink' (enforced in config._check) since that path is handled here.
 
 Reference caveat: ICLabel was trained on common-average-referenced data; we keep
 the supervisor's linked-ears reference, so it runs slightly off-distribution. For
@@ -36,6 +48,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import mne
+import numpy as np
 from mne.preprocessing import ICA
 from mne_icalabel import label_components
 
@@ -55,11 +68,16 @@ class ICAReport:
     eeg_channels: list[str]          # channels the ICA was fit on (canonical order)
     labels: list[str]                # winning ICLabel class per component
     probabilities: list[float]       # winning probability per component
-    exclude_labels: list[str]        # classes eligible for removal
+    exclude_labels: list[str]        # non-ocular ICLabel classes eligible for removal
     iclabel_min_prob: float
-    excluded_idx: list[int]          # components actually removed
-    excluded_labels: list[str]       # their winning labels
-    excluded_probs: list[float]      # their winning probabilities
+    iclabel_excluded_idx: list[int]  # components removed via ICLabel winning-label rule
+    eog_channels: list[str]          # frontal channels used as the blink-correlation proxy
+    eog_corr_threshold: float        # |r| cutoff for a component to count as ocular
+    eog_scores: list[float]          # per-component max|r| across eog_channels
+    eog_excluded_idx: list[int]      # components removed via frontal-correlation rule
+    excluded_idx: list[int]          # union of iclabel_excluded_idx and eog_excluded_idx
+    excluded_labels: list[str]       # their winning ICLabel labels (provenance only)
+    excluded_probs: list[float]      # their winning ICLabel probabilities (provenance only)
 
     def as_dict(self) -> dict:
         return {
@@ -77,6 +95,11 @@ class ICAReport:
             "excluded_probs": [round(p, 4) for p in self.excluded_probs],
             "iclabel_min_prob": self.iclabel_min_prob,
             "exclude_labels": self.exclude_labels,
+            "iclabel_excluded_idx": self.iclabel_excluded_idx,
+            "eog_channels": self.eog_channels,
+            "eog_corr_threshold": self.eog_corr_threshold,
+            "eog_scores": [round(s, 4) for s in self.eog_scores],
+            "eog_excluded_idx": self.eog_excluded_idx,
             "all_labels": self.labels,
             "all_probs": [round(p, 4) for p in self.probabilities],
         }
@@ -216,8 +239,27 @@ def clean_with_ica(cfg: Config, raw_filt: mne.io.BaseRaw, key: str,
     labels = list(labelling["labels"])
     probs = [float(p) for p in labelling["y_pred_proba"]]
 
-    exclude_idx = [i for i, (lbl, p) in enumerate(zip(labels, probs))
-                   if lbl in ic.exclude_labels and p >= ic.iclabel_min_prob]
+    # Non-ocular artifacts: ICLabel winning-label rule.
+    iclabel_exclude_idx = [i for i, (lbl, p) in enumerate(zip(labels, probs))
+                            if lbl in ic.exclude_labels and p >= ic.iclabel_min_prob]
+
+    # Eye blinks: frontal-channel correlation (find_bads_eog), NOT ICLabel's
+    # label -- see module docstring / PROGRESS.md Problem 2. measure='correlation'
+    # returns |r| in [0, 1] against a blink-band-filtered template built from each
+    # eog_channel; a component is ocular if it clears eog_corr_threshold on ANY
+    # frontal channel.
+    per_channel_scores = []
+    for ch in ic.eog_channels:
+        _, scores = ica.find_bads_eog(
+            raw_fit, ch_name=ch, threshold=ic.eog_corr_threshold,
+            l_freq=ic.eog_l_freq, h_freq=ic.eog_h_freq,
+            measure="correlation", verbose="ERROR")
+        per_channel_scores.append(np.abs(np.asarray(scores, float)))
+    eog_scores = np.maximum.reduce(per_channel_scores)
+    eog_exclude_idx = [i for i in range(ic.n_components)
+                        if eog_scores[i] >= ic.eog_corr_threshold]
+
+    exclude_idx = sorted(set(iclabel_exclude_idx) | set(eog_exclude_idx))
     ica.exclude = exclude_idx
 
     if ic.save_plots and report_dir is not None:
@@ -239,11 +281,15 @@ def clean_with_ica(cfg: Config, raw_filt: mne.io.BaseRaw, key: str,
         random_state=ic.random_state, decim=ic.decim, fit_highpass_hz=ic.fit_highpass_hz,
         eeg_channels=eeg_channels, labels=labels, probabilities=probs,
         exclude_labels=list(ic.exclude_labels), iclabel_min_prob=ic.iclabel_min_prob,
+        iclabel_excluded_idx=iclabel_exclude_idx,
+        eog_channels=list(ic.eog_channels), eog_corr_threshold=ic.eog_corr_threshold,
+        eog_scores=[float(s) for s in eog_scores], eog_excluded_idx=eog_exclude_idx,
         excluded_idx=exclude_idx,
         excluded_labels=[labels[i] for i in exclude_idx],
         excluded_probs=[probs[i] for i in exclude_idx],
     )
     print(f"[stage2b] {key}: ICA {ic.method}(extended={ic.extended}) "
           f"n_comp={ic.n_components} seed={ic.random_state} -> removed "
-          f"{len(exclude_idx)}/{ic.n_components} {report.excluded_labels}")
+          f"{len(exclude_idx)}/{ic.n_components} total "
+          f"(iclabel={iclabel_exclude_idx}, eog-frontal-corr={eog_exclude_idx})")
     return cleaned, report

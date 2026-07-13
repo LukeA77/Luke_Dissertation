@@ -36,6 +36,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import mne
+import numpy as np
 from mne.preprocessing import ICA
 from mne_icalabel import label_components
 
@@ -87,7 +88,27 @@ def _refit_ica(cfg: Config, raw_eeg: mne.io.BaseRaw):
     return ica, raw_fit, labels, probs
 
 
+def _refit_eog(ic, ica: ICA, raw_fit: mne.io.BaseRaw) -> tuple[list[float], list[int]]:
+    """Refit the frontal-correlation blink exclusion exactly as clean_with_ica.
+
+    Duplicated (not imported) for the same reason as ``_refit_ica``: a future
+    change to the production rule must be caught by the determinism assertion,
+    not silently inherited.
+    """
+    per_channel_scores = []
+    for ch in ic.eog_channels:
+        _, scores = ica.find_bads_eog(
+            raw_fit, ch_name=ch, threshold=ic.eog_corr_threshold,
+            l_freq=ic.eog_l_freq, h_freq=ic.eog_h_freq,
+            measure="correlation", verbose="ERROR")
+        per_channel_scores.append(np.abs(np.asarray(scores, float)))
+    eog_scores = np.maximum.reduce(per_channel_scores)
+    eog_exclude_idx = [i for i in range(ic.n_components) if eog_scores[i] >= ic.eog_corr_threshold]
+    return eog_scores.tolist(), eog_exclude_idx
+
+
 def _assert_matches_published(key: str, labels: list[str], probs: list[float],
+                              eog_exclude_idx: list[int],
                               ic, published_path: Path) -> tuple[list[int], list[int]]:
     """Fail loudly if the refit decomposition disagrees with the published report."""
     if not published_path.exists():
@@ -96,8 +117,9 @@ def _assert_matches_published(key: str, labels: list[str], probs: list[float],
             f"eeg_reref_ica.py first; refusing to plot an unpublished decomposition.")
     published = json.loads(published_path.read_text(encoding="utf-8"))
 
-    exclude_idx = [i for i, (lbl, p) in enumerate(zip(labels, probs))
-                   if lbl in ic.exclude_labels and p >= ic.iclabel_min_prob]
+    iclabel_exclude_idx = [i for i, (lbl, p) in enumerate(zip(labels, probs))
+                           if lbl in ic.exclude_labels and p >= ic.iclabel_min_prob]
+    exclude_idx = sorted(set(iclabel_exclude_idx) | set(eog_exclude_idx))
     flagged_idx = [i for i, p in enumerate(probs) if p >= ic.iclabel_min_prob]
 
     mismatches = []
@@ -106,6 +128,10 @@ def _assert_matches_published(key: str, labels: list[str], probs: list[float],
     pub_probs = published["all_probs"]
     if len(probs) != len(pub_probs) or any(abs(a - b) > 1e-4 for a, b in zip(probs, pub_probs)):
         mismatches.append(f"probabilities differ: refit={probs} published={pub_probs}")
+    if eog_exclude_idx != published["eog_excluded_idx"]:
+        mismatches.append(
+            f"eog_excluded_idx differ: refit={eog_exclude_idx} "
+            f"published={published['eog_excluded_idx']}")
     if exclude_idx != published["excluded_idx"]:
         mismatches.append(f"excluded_idx differ: refit={exclude_idx} published={published['excluded_idx']}")
 
@@ -116,7 +142,8 @@ def _assert_matches_published(key: str, labels: list[str], probs: list[float],
             f"result than what was already reported.\n  " + "\n  ".join(mismatches))
 
     print(f"[ica_review_plots] {key}: refit MATCHES published report "
-          f"({published_path.name}) -- {len(exclude_idx)} excluded, "
+          f"({published_path.name}) -- {len(exclude_idx)} excluded "
+          f"(iclabel={iclabel_exclude_idx}, eog-frontal-corr={eog_exclude_idx}), "
           f"{len(flagged_idx)} flagged (prob >= {ic.iclabel_min_prob})")
     return exclude_idx, flagged_idx
 
@@ -132,8 +159,11 @@ def _plot_recording(cfg: Config, rec: Recording, review_dir: Path) -> dict:
     del raw_eeg
     gc.collect()
 
+    _, eog_exclude_idx = _refit_eog(ic, ica, raw_fit)
+
     published_path = cfg.ica_run_dir / f"ica_report_{rec.key}.json"
-    exclude_idx, flagged_idx = _assert_matches_published(rec.key, labels, probs, ic, published_path)
+    exclude_idx, flagged_idx = _assert_matches_published(
+        rec.key, labels, probs, eog_exclude_idx, ic, published_path)
 
     rec_dir = review_dir / rec.key
     rec_dir.mkdir(parents=True, exist_ok=True)
@@ -193,8 +223,12 @@ def _write_index(cfg: Config, review_dir: Path, results: list[dict]) -> None:
         "determinism check performed before any plot was drawn.",
         "",
         f"- ICLabel probability cutoff (`ica.iclabel_min_prob`): **{ic.iclabel_min_prob}**",
-        f"- Classes eligible for exclusion (`ica.exclude_labels`): {ic.exclude_labels}",
+        f"- Non-ocular classes eligible for exclusion (`ica.exclude_labels`): {ic.exclude_labels}",
         "- `brain` and `other` are always kept regardless of probability.",
+        f"- Eye blinks are identified separately by frontal-channel correlation "
+        f"(`ica.eog_channels`={ic.eog_channels}, `ica.eog_corr_threshold`="
+        f"{ic.eog_corr_threshold}), not by ICLabel's winning label -- see "
+        f"PROGRESS.md Problem 2.",
         f"- Property plots are rendered on the first {ic.plot_crop_s:.0f}s of the "
         "1 Hz high-passed fit instance (same crop as production, for memory).",
         "- Every recording's refit was asserted to match its published "
